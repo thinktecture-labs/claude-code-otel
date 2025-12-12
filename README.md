@@ -20,6 +20,8 @@ This project provides two dashboard options to give you full observability into 
 - **Token Usage** - Input, output, cache read, and cache creation tokens
 - **Cost per 1K Output Tokens** - Efficiency metric to track spending trends
 - **Cache Efficiency** - Percentage of input served from cache (higher = cheaper)
+- **Cost per Commit** - Average API cost per git commit made
+- **Cost per 100 LOC** - Average API cost per 100 lines of code accepted
 
 ### Productivity Metrics
 - **Sessions** - Count of unique Claude Code sessions
@@ -61,7 +63,7 @@ docker stop claude-dashboard
 Best for: Rich visualizations, historical data, alerting, production use.
 
 ```bash
-# Start the Grafana stack (Grafana + Prometheus + OTEL Collector)
+# Start the Grafana stack (Grafana + Prometheus + Loki + OTEL Collector)
 ./start-grafana-stack.sh
 
 # Start Claude Code in this directory (picks up .claude/settings.json)
@@ -74,21 +76,22 @@ docker compose -f grafana/docker-compose.yml down
 **Access:**
 - Grafana UI: http://localhost:18888 (admin/admin or anonymous access)
 - Prometheus: http://localhost:9090
+- Loki: http://localhost:3100 (logs backend)
 - OTLP endpoint: `localhost:4317` (gRPC) or `localhost:4318` (HTTP)
 
-The Grafana dashboard opens automatically as the home page with all metrics pre-configured.
+The Grafana dashboard opens automatically as the home page with all metrics and logs pre-configured.
 
 ## Dashboard Comparison
 
 | Feature                    | Aspire Dashboard | Grafana Stack                     |
 |----------------------------|------------------|-----------------------------------|
-| Setup complexity           | Single container | Three containers (compose)        |
+| Setup complexity           | Single container | Four containers (compose)         |
 | Metrics visualization      | Basic            | Rich dashboards, graphs, gauges   |
-| Logs viewing               | Yes              | No (metrics only)                 |
-| Pre-built Claude dashboard | No               | Yes                               |
-| Custom queries             | Limited          | Full PromQL support               |
+| Logs viewing               | Yes              | Yes (Loki)                        |
+| Pre-built Claude dashboard | No               | Yes (metrics + logs)              |
+| Custom queries             | Limited          | Full PromQL + LogQL support       |
 | Alerting                   | No               | Yes (Grafana alerting)            |
-| Data retention             | In-memory        | Persistent (Prometheus)           |
+| Data retention             | In-memory        | Persistent (Prometheus + Loki)    |
 
 ## Grafana Dashboard Panels
 
@@ -122,6 +125,8 @@ The pre-configured dashboard provides a comprehensive view of your Claude Code u
 | Cost per 1K Output | Average cost efficiency metric                     |
 | Productivity Ratio | Gauge showing CLI/User time ratio                  |
 | Peak Leverage      | Highest productivity ratio achieved                |
+| Cost per Commit    | Average API cost per git commit made               |
+| Cost per 100 LOC   | Average API cost per 100 lines of code accepted    |
 
 ### Distribution Charts
 
@@ -140,6 +145,19 @@ The pre-configured dashboard provides a comprehensive view of your Claude Code u
 | Token Usage by Model  | Rate of token consumption by model |
 | Cost Over Time        | Cost accumulation rate ($/5min)    |
 | Active Time Over Time | CLI and User activity rates        |
+
+### Logs Panel
+
+| Panel            | Description                                             |
+|------------------|---------------------------------------------------------|
+| Claude Code Logs | Live streaming logs from Claude Code sessions via Loki  |
+
+The logs panel displays structured logs from your Claude Code sessions with automatic JSON parsing, allowing you to:
+- View real-time log output as you interact with Claude
+- Search and filter logs using LogQL queries (e.g., `{exporter="OTLP"} |= "error"`)
+- Extract structured fields from JSON logs with `| json`
+- Correlate log events with metric spikes
+- Debug issues by examining detailed session activity
 
 ## Configuration
 
@@ -190,19 +208,25 @@ Claude Code  ──OTLP──▶  Aspire Dashboard (logs + metrics)
 
 ### Grafana Stack
 
-Full observability stack with persistent storage:
+Full observability stack with persistent storage for metrics and logs:
 
 ```
-Claude Code  ──OTLP──▶  OTEL Collector  ──scrape──▶  Prometheus  ──query──▶  Grafana
-                           :4317                        :9090                 :18888
-                             │
-                             └── Converts OTLP metrics to Prometheus format
+                                              ┌──────────────┐
+                                         ┌───▶│  Prometheus  │───┐
+                                         │    │    :9090     │   │
+Claude Code  ──OTLP──▶  OTEL Collector ──┤    └──────────────┘   ├──▶  Grafana
+                           :4317         │                       │      :18888
+                                         │    ┌──────────────┐   │
+                                         └───▶│     Loki     │───┘
+                                              │    :3100     │
+                                              └──────────────┘
 ```
 
 **Components:**
-- **OTEL Collector** - Receives OTLP data, exports as Prometheus metrics
-- **Prometheus** - Scrapes and stores metrics, provides PromQL queries
-- **Grafana** - Visualizes data with pre-built dashboard
+- **OTEL Collector** - Receives OTLP data, routes metrics to Prometheus and logs to Loki
+- **Prometheus** - Stores metrics, provides PromQL queries
+- **Loki** - Stores logs, provides LogQL queries
+- **Grafana** - Unified dashboard for metrics and logs
 
 ## Troubleshooting
 
@@ -223,6 +247,33 @@ Claude Code  ──OTLP──▶  OTEL Collector  ──scrape──▶  Prometh
 3. **Check Prometheus targets (Grafana stack):**
    - Open http://localhost:9090/targets
    - Verify `otel-collector` target is UP
+
+4. **Check Loki is receiving logs:**
+   ```bash
+   # Check Loki logs
+   docker logs claude-loki
+
+   # Query Loki directly
+   curl -s "http://localhost:3100/loki/api/v1/labels" | jq
+   ```
+
+### No logs appearing
+
+1. **Verify the OTEL Collector is forwarding logs:**
+   ```bash
+   docker logs claude-otel-collector | grep -i loki
+   ```
+
+2. **Check Loki is healthy:**
+   ```bash
+   curl -s http://localhost:3100/ready
+   ```
+
+3. **Query logs directly:**
+   ```bash
+   curl -G -s "http://localhost:3100/loki/api/v1/query_range" \
+     --data-urlencode 'query={exporter="OTLP"}' | jq
+   ```
 
 ### Metrics are delayed
 
@@ -247,4 +298,6 @@ docker stop claude-dashboard claude-grafana
 - [Claude Code Monitoring Documentation](https://docs.anthropic.com/en/docs/claude-code/monitoring)
 - [Aspire Dashboard Standalone](https://learn.microsoft.com/en-us/dotnet/aspire/fundamentals/dashboard/standalone)
 - [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
+- [Grafana Loki Documentation](https://grafana.com/docs/loki/latest/)
+- [LogQL Query Language](https://grafana.com/docs/loki/latest/logql/)
 - [Grafana Dashboard JSON](https://gist.github.com/yangchuansheng/dfd65826920eeb76f19a019db2827d62) (dashboard source)

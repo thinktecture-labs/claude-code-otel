@@ -10,6 +10,21 @@ processors:
   batch:
     timeout: 10s
 
+  resource:
+    attributes:
+      - key: service.name
+        value: claude-code
+        action: upsert
+      - key: job
+        value: claude-code
+        action: upsert
+
+  attributes:
+    actions:
+      - key: loki.attribute.labels
+        value: level,service.name,job
+        action: upsert
+
 exporters:
   prometheus:
     endpoint: "0.0.0.0:8889"
@@ -18,6 +33,11 @@ exporters:
     metric_expiration: 180m
     resource_to_telemetry_conversion:
       enabled: true
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
 
   debug:
     verbosity: basic
@@ -28,3 +48,7 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource, attributes]
+      exporters: [otlphttp/loki, debug]
